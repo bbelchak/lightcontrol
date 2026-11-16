@@ -1,0 +1,18 @@
+{
+  "name": "lightcontrol",
+  "description": "omp extension that recolors Philips Hue lights while omp waits on you",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "lights": "bun src/cli.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@oh-my-pi/pi-coding-agent": "18.20.2",
+    "@types/bun": "latest",
+    "typescript": "^7"
+  },
+  "peerDependencies": {
+    "typescript": "^7"
+  }
+}
