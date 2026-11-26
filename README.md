@@ -1,28 +1,37 @@
-# lightcontrol
+# omp-lightcontrol
 
-omp extension that recolors Philips Hue lights while omp is waiting on you, then puts them back.
+An [omp](https://omp.sh) extension that recolors Philips Hue lights while omp is waiting on you, then puts them
+back. Outside the active hours you set (08:00 to 22:00 by default), it switches the lights off instead.
 
 | Signal | Default color | When |
 | --- | --- | --- |
 | `input` | red-orange `#ff3000` | `ask` prompt, tool approval, or plan review is open |
 | `done` | green `#00ff50` | the main agent settled and waits for your next prompt |
 
-Lights return to their captured state when you answer, submit a prompt, or the session exits. Only the
-top-level interactive session counts (subagents, print mode, and nested `omp` runs are ignored). Several omp
-sessions share one state file (`~/.config/lightcontrol/state.json`): the most urgent reason across live
-sessions wins, and the lights are restored only after the last one stops waiting. A detached watcher
+During active hours, lights return to their captured state when you answer, submit a prompt, or the session
+exits. Only the top-level interactive session counts (subagents, print mode, and nested `omp` runs are ignored).
+Several omp sessions share one state file (`~/.config/lightcontrol/state.json`): the most urgent reason across
+live sessions wins, and the lights are restored only after the last one stops waiting. A detached watcher
 restores them if omp is killed or its terminal closes.
+
+## Requirements
+
+- [omp](https://github.com/can1357/oh-my-pi)
+- [Bun](https://bun.sh) on `PATH` (the exit watcher runs with it)
+- A Philips Hue bridge on the same network
 
 ## Setup
 
 ```sh
+git clone https://github.com/bbelchak/omp-lightcontrol.git
+cd omp-lightcontrol
 bun install
 bun run lights setup      # finds the bridge, waits for the link button, picks lights
 bun run lights install    # writes ~/.omp/agent/extensions/lightcontrol.ts
 bun run lights test       # flashes input, then done, then restores
 ```
 
-New omp sessions load the extension. Requires `bun` on `PATH` (the exit watcher runs with it).
+New omp sessions load the extension. `install` points it at this checkout, so keep the clone where it is.
 
 ## Commands
 
@@ -57,3 +66,7 @@ so edits apply without restarting omp.
 - White-only bulbs get brightness and the flash but not the color.
 
 Manual light changes made while an alert is showing are overwritten by the restore.
+
+## License
+
+[MIT](LICENSE)
