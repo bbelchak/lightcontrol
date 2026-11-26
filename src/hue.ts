@@ -84,7 +84,7 @@ export async function discoverBridges(): Promise<string[]> {
 export async function pair(bridge: string): Promise<string> {
 	const [result] = await request<[{ success: { username: string } }]>(bridge, "", {
 		method: "POST",
-		body: { devicetype: "lightcontrol#omp" },
+		body: { devicetype: "lightcontrol#agent" },
 	});
 	return result.success.username;
 }

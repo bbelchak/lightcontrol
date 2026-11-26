@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { type ActiveHours, parseHHMM } from "./hours.ts";
 
-/** Why omp wants attention. `input` (ask/approval/plan review) outranks `done` (agent settled). */
+/** Why an agent wants attention. `input` (ask/approval/plan review) outranks `done` (agent settled). */
 export type Reason = "input" | "done";
 export const REASON_PRIORITY: readonly Reason[] = ["input", "done"];
 

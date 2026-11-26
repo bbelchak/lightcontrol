@@ -1,21 +1,31 @@
 #!/usr/bin/env bun
-import { mkdir, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import path from "node:path";
 import { parseArgs } from "node:util";
-import { isAlive, readState, refreshAttention, resetAttention, setAttention } from "./attention.ts";
+import { isAlive, readState, refreshAttention, resetAttention, runMonitor, setAttention } from "./attention.ts";
 import { type Config, configPath, DEFAULTS, loadConfig, saveConfig } from "./config.ts";
+import { handleHook, type HookAgent, runHookSync } from "./hooks.ts";
 import { discoverBridges, getGroups, getLights, HueError, LINK_BUTTON_NOT_PRESSED, pair } from "./hue.ts";
+import {
+	ALL_TARGETS,
+	detectTargets,
+	type InstallTarget,
+	installTarget,
+	isInstallTarget,
+	uninstallTarget,
+} from "./install.ts";
 
 const USAGE = `usage: bun run lights <command>
 
   setup [--bridge IP] [--lights 1,2 | --room NAME]   pair with the bridge and pick lights
-  install                                           load the extension in every omp session
-  list                                              show rooms and lights
-  test                                              flash each alert color
-  clear                                             restore lights and drop every session's alert
-  status                                            show config and attention state
-  watch PID                                         (internal) restore lights after omp PID exits`;
+  install [omp|agy|claude|codex|all ...]             install integrations (default: all detected)
+  uninstall [omp|agy|claude|codex|all ...]           remove installed integrations
+  list                                               show rooms and lights
+  test                                               flash each alert color
+  clear                                              restore lights and drop every session's alert
+  status                                             show config and attention state
+  hook <agy|claude|codex>                            (internal) lifecycle hook entry point
+  sync-hook <hash>                                   (internal) reconcile a pending hook intent
+  monitor                                            (internal) watch active waiters and active hours
+  watch PID                                          (internal) restore lights after omp PID exits`;
 
 const { positionals, values } = parseArgs({
 	args: Bun.argv.slice(2),
@@ -96,13 +106,46 @@ async function setup(): Promise<void> {
 	console.log(`Saved ${configPath} (lights ${lights.join(", ")}).`);
 }
 
-async function install(): Promise<void> {
-	const agentDir = process.env.PI_CODING_AGENT_DIR ?? path.join(homedir(), ".omp", "agent");
-	const target = path.join(agentDir, "extensions", "lightcontrol.ts");
-	const entry = path.resolve(import.meta.dir, "extension.ts");
-	await mkdir(path.dirname(target), { recursive: true });
-	await writeFile(target, `// installed by ${import.meta.path}\nexport { default } from ${JSON.stringify(entry)};\n`);
-	console.log(`Wrote ${target}; new omp sessions will load it.`);
+function resolveRequestedTargets(raw: string[]): InstallTarget[] | null {
+	if (raw.length === 0) return null;
+	if (raw.includes("all")) return [...ALL_TARGETS];
+	const targets: InstallTarget[] = [];
+	for (const item of raw) {
+		if (!isInstallTarget(item)) {
+			throw new Error(`unknown target ${JSON.stringify(item)}; expected one of ${ALL_TARGETS.join(", ")}, all`);
+		}
+		if (!targets.includes(item)) targets.push(item);
+	}
+	return targets;
+}
+
+async function install(args: string[]): Promise<void> {
+	const targets = resolveRequestedTargets(args) ?? (await detectTargets());
+	if (targets.length === 0) {
+		console.log(`No supported agents detected; pass explicit targets (${ALL_TARGETS.join(", ")}, or all).`);
+		return;
+	}
+	for (const target of targets) {
+		const res = await installTarget(target);
+		console.log(`[${res.target}] Installed ${res.path}${res.note ? ` (${res.note})` : ""}.`);
+	}
+}
+
+async function uninstall(args: string[]): Promise<void> {
+	const targets = resolveRequestedTargets(args) ?? [...ALL_TARGETS];
+	let removed = 0;
+	for (const target of targets) {
+		const res = await uninstallTarget(target);
+		if (res) {
+			removed++;
+			console.log(`[${res.target}] Removed from ${res.path}.`);
+		}
+	}
+	if (removed === 0) console.log("No lightcontrol integrations were installed.");
+}
+
+function isHookAgent(value: string | undefined): value is HookAgent {
+	return value === "agy" || value === "claude" || value === "codex";
 }
 
 switch (positionals[0]) {
@@ -110,7 +153,10 @@ switch (positionals[0]) {
 		await setup();
 		break;
 	case "install":
-		await install();
+		await install(positionals.slice(1));
+		break;
+	case "uninstall":
+		await uninstall(positionals.slice(1));
 		break;
 	case "list": {
 		const config = await requireConfig();
@@ -133,8 +179,24 @@ switch (positionals[0]) {
 		await requireConfig();
 		await resetAttention();
 		break;
+	case "hook": {
+		const agent = positionals[1];
+		if (!isHookAgent(agent)) throw new Error("hook needs an agent: agy, claude, or codex");
+		const stdinText = await Bun.stdin.text().catch(() => "");
+		await handleHook(agent, stdinText, import.meta.path).catch(() => undefined);
+		break;
+	}
+	case "sync-hook": {
+		const keyHash = positionals[1];
+		if (!keyHash) throw new Error("sync-hook needs a key hash");
+		await runHookSync(keyHash, import.meta.path);
+		break;
+	}
+	case "monitor":
+		await runMonitor();
+		break;
 	case "watch": {
-		// Spawned detached by the extension: covers omp exits that skip session_shutdown (SIGHUP, SIGTERM, crash).
+		// Spawned detached by the omp extension: covers exits that skip session_shutdown (SIGHUP, SIGTERM, crash).
 		const pid = Number(positionals[1]);
 		if (!Number.isInteger(pid) || pid <= 0) throw new Error("watch needs a pid");
 		while (isAlive(pid)) await Bun.sleep(2000);

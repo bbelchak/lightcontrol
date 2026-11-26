@@ -1,10 +1,11 @@
 {
   "name": "omp-lightcontrol",
-  "description": "omp extension that recolors Philips Hue lights while omp waits on you",
+  "description": "Recolors Philips Hue lights while omp, Antigravity (agy), Claude Code, or Codex is waiting on you",
   "type": "module",
   "private": true,
   "scripts": {
     "lights": "bun src/cli.ts",
+    "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

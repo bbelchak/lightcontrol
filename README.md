@@ -1,24 +1,36 @@
-# omp-lightcontrol
+# lightcontrol
 
-An [omp](https://omp.sh) extension that recolors Philips Hue lights while omp is waiting on you, then puts them
-back. Outside the active hours you set (08:00 to 22:00 by default), it switches the lights off instead.
+Recolors Philips Hue lights while your coding agent is waiting on you, then puts them back. Supports
+[omp](https://omp.sh), [Antigravity (`agy`)](https://antigravity.google),
+[Claude Code](https://code.claude.com), and [Codex](https://developers.openai.com/codex) across shared
+state. Outside the active hours you set (08:00 to 22:00 by default), it switches the lights off instead.
 
 | Signal | Default color | When |
 | --- | --- | --- |
-| `input` | red-orange `#ff3000` | `ask` prompt, tool approval, or plan review is open |
+| `input` | red-orange `#ff3000` | question prompt, tool approval, or plan review is open |
 | `done` | green `#00ff50` | the main agent settled and waits for your next prompt |
 
 During active hours, lights return to their captured state when you answer, submit a prompt, or the session
-exits. Only the top-level interactive session counts (subagents, print mode, and nested `omp` runs are ignored).
-Several omp sessions share one state file (`~/.config/lightcontrol/state.json`): the most urgent reason across
-live sessions wins, and the lights are restored only after the last one stops waiting. A detached watcher
-restores them if omp is killed or its terminal closes.
+exits. Only top-level interactive sessions count (subagents and nested runs are ignored). Sessions across
+all supported agents share one state file (`~/.config/lightcontrol/state.json`): the most urgent reason
+across live sessions wins, and the lights are restored only after the last one stops waiting. A detached
+background monitor restores them if an agent is killed or its terminal closes, and switches still-showing
+alerts off when active hours end.
+
+## Agent Support
+
+| Agent | Integration | `input` signals | `done` signal | Notes |
+| --- | --- | --- | --- | --- |
+| **omp** | `~/.omp/agent/extensions/lightcontrol.ts` | `ask`, tool approval, plan review | `agent_end` | Also registers `/lights clear \| test`. |
+| **Antigravity (`agy`)** | `~/.gemini/config/plugins/lightcontrol/` | `ask_question` | `Stop` (skips `USER_CANCELED`) | Antigravity does not expose a tool-approval prompt hook; `ask_question` and `Stop` work in both CLI and app. |
+| **Claude Code** | `~/.claude/settings.json` (`hooks`) | `PermissionRequest`, `Notification` (`permission_prompt`, `elicitation_*`), `AskUserQuestion`, `ExitPlanMode` | `Stop` | Merges non-destructively with existing hooks; ignores subagents (`agent_id`). |
+| **Codex** | `~/.codex/hooks.json` (`hooks`) | `PermissionRequest`, `request_user_input` | `Stop` | Merges non-destructively; requires `[features] hooks = true` and trusting hooks via `/hooks`. |
 
 ## Requirements
 
-- [omp](https://github.com/can1357/oh-my-pi)
-- [Bun](https://bun.sh) on `PATH` (the exit watcher runs with it)
+- [Bun](https://bun.sh)
 - A Philips Hue bridge on the same network
+- One or more of: `omp`, `agy` (Antigravity), `claude` (Claude Code), `codex` (OpenAI Codex)
 
 ## Setup
 
@@ -27,21 +39,25 @@ git clone https://github.com/bbelchak/omp-lightcontrol.git
 cd omp-lightcontrol
 bun install
 bun run lights setup      # finds the bridge, waits for the link button, picks lights
-bun run lights install    # writes ~/.omp/agent/extensions/lightcontrol.ts
+bun run lights install    # installs into all detected agents (or pass: omp agy claude codex all)
 bun run lights test       # flashes input, then done, then restores
 ```
 
-New omp sessions load the extension. `install` points it at this checkout, so keep the clone where it is.
+`install` points each agent at this checkout, so keep the clone where it is. For Codex, run `/hooks` inside
+Codex after installing to review and trust the new hooks.
 
 ## Commands
 
+- `bun run lights setup [--bridge IP] [--lights 1,2 | --room NAME]`
+- `bun run lights install [omp|agy|claude|codex|all ...]`: defaults to every detected agent.
+- `bun run lights uninstall [omp|agy|claude|codex|all ...]`: cleanly removes only lightcontrol's hooks/extension.
 - `bun run lights list | test | clear | status`: `clear` restores the lights and drops every session's alert.
-- `/lights clear` and `/lights test` inside omp.
+- `/lights clear` and `/lights test` inside `omp`.
 
 ## Config
 
 `~/.config/lightcontrol/config.json` (override the directory with `LIGHTCONTROL_DIR`); read on every alert,
-so edits apply without restarting omp.
+so edits apply without restarting your agent.
 
 ```json
 {

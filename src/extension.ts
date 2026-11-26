@@ -20,8 +20,7 @@ let watcherStarted = false;
 function startExitWatcher(): void {
 	if (watcherStarted) return;
 	watcherStarted = true;
-	const bun = Bun.which("bun");
-	if (!bun) return;
+	const bun = Bun.which("bun") ?? process.execPath;
 	Bun.spawn([bun, path.join(import.meta.dir, "cli.ts"), "watch", String(process.pid)], {
 		stdio: ["ignore", "ignore", "ignore"],
 		detached: true,

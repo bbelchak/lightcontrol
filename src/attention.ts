@@ -1,17 +1,18 @@
 /**
- * Cross-process attention state. Every omp session shares one state file, so the lights show the
- * most urgent reason any live session is waiting on, and the pre-alert light state is captured once
- * and restored only after the last session stops waiting. Outside the configured active hours, alert
- * events switch the lights off instead, and nothing is restored afterwards.
+ * Cross-process attention state. Every supported agent session shares one state file, so the lights
+ * show the most urgent reason any live session is waiting on, and the pre-alert light state is
+ * captured once and restored only after the last session stops waiting. Outside the configured
+ * active hours, alert events switch the lights off instead, and nothing is restored afterwards.
  */
-import { mkdir, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { type Config, configDir, loadConfig, REASON_PRIORITY, type Reason, writeJsonAtomic } from "./config.ts";
-import { activeWindowStart } from "./hours.ts";
+import { activeWindowStart, nextWindowEnd } from "./hours.ts";
 import { getLights, hexToXy, type LightState, restoreUpdate, setLightState } from "./hue.ts";
 
-interface Waiter {
-	pid: number;
+export interface Waiter {
+	/** Host process whose lifetime owns this waiter; pruned once dead. */
+	pid?: number;
 	reason: Reason;
 	since: number;
 	/** Shown regardless of active hours (`lights test`). */
@@ -26,8 +27,20 @@ export interface AttentionState {
 	waiters: Record<string, Waiter>;
 }
 
+export interface AttentionOptions {
+	/** Shown regardless of active hours (`lights test`). */
+	force?: boolean;
+	/** Host process whose lifetime owns this waiter (defaults to `process.pid`; pass `null` for none). */
+	pid?: number | null;
+}
+
+export type SyncDecision =
+	| { reason: Reason | undefined; pid?: number | null; force?: boolean }
+	| "skip";
+
 const statePath = path.join(configDir, "state.json");
 const lockPath = path.join(configDir, "state.lock");
+const monitorPidPath = path.join(configDir, "monitor.pid");
 /** Longer than the worst-case critical section (snapshot GET + parallel PUTs, 4s timeout each). */
 const STALE_LOCK_MS = 15_000;
 
@@ -42,15 +55,121 @@ type Trigger = "event" | "boundary";
  * restores the lights if the winning reason changed. `force` ignores active hours.
  * No-op when setup has not been run.
  */
-export async function setAttention(key: string, reason: Reason | undefined, force = false): Promise<void> {
+export async function setAttention(
+	key: string,
+	reason: Reason | undefined,
+	options?: boolean | AttentionOptions,
+): Promise<void> {
+	const force = typeof options === "boolean" ? options : (options?.force ?? false);
+	const pidOpt = typeof options === "object" ? options.pid : undefined;
+	const pid = pidOpt === null ? undefined : (pidOpt ?? process.pid);
+	await syncAttention(key, async () => ({ reason, pid: pid ?? null, force }));
+}
+
+/**
+ * Applies a reason computed inside the attention lock, so concurrent detached hook workers
+ * always reconcile against the latest on-disk intent and cannot apply stale events out of order.
+ * Returns `true` while any alert or watched waiter remains active.
+ */
+export async function syncAttention(key: string, resolve: () => Promise<SyncDecision>): Promise<boolean> {
 	const config = await loadConfig();
-	if (!config) return;
-	await withLock(async () => {
+	if (!config) return false;
+	return withLock(async () => {
+		const decision = await resolve();
 		const state = await readState();
-		if (reason) state.waiters[key] = { pid: process.pid, reason, since: Date.now(), ...(force && { force }) };
-		else delete state.waiters[key];
+		if (decision === "skip") {
+			return needsMonitor(state);
+		}
+		const { reason, force = false } = decision;
+		const pid = decision.pid === null ? undefined : (decision.pid ?? process.pid);
+		if (reason) {
+			state.waiters[key] = {
+				...(pid !== undefined && { pid }),
+				reason,
+				since: Date.now(),
+				...(force && { force }),
+			};
+		} else {
+			delete state.waiters[key];
+		}
 		await reconcile(config, state, reason && !force && config.colors[reason] ? "event" : undefined);
+		return needsMonitor(state);
 	});
+}
+
+function needsMonitor(state: AttentionState): boolean {
+	return Boolean(state.shown) || Object.values(state.waiters).some(w => w.pid !== undefined);
+}
+
+/** Ensures a single detached monitor process is running to watch dead PIDs and active-hours boundaries. */
+export async function ensureMonitor(cliPath: string): Promise<void> {
+	const existing = await readMonitorPid();
+	if (existing !== undefined && isAlive(existing)) return;
+	const bun = Bun.which("bun") ?? process.execPath;
+	Bun.spawn([bun, cliPath, "monitor"], {
+		stdio: ["ignore", "ignore", "ignore"],
+		detached: true,
+		env: process.env,
+	}).unref();
+}
+
+/**
+ * Background monitor: watches active waiters for exited host processes and switches still-showing
+ * alerts off when the active hours window closes. Exits automatically once nothing needs watching.
+ */
+export async function runMonitor(): Promise<void> {
+	if (!(await claimMonitorSlot())) return;
+	try {
+		for (;;) {
+			const config = await loadConfig().catch(() => undefined);
+			const state = await readState().catch(() => ({ waiters: {} }) as AttentionState);
+			if (!config || !needsMonitor(state)) break;
+
+			const hasDeadWaiter = Object.values(state.waiters).some(w => w.pid !== undefined && !isAlive(w.pid));
+			if (hasDeadWaiter) {
+				await refreshAttention().catch(() => undefined);
+				continue;
+			}
+
+			if (state.shown && activeWindowStart(config.activeHours) === undefined) {
+				await refreshAttention("boundary").catch(() => undefined);
+				continue;
+			}
+
+			const end = nextWindowEnd(config.activeHours);
+			const sleepMs = end !== undefined ? Math.max(250, Math.min(2000, end - Date.now() + 1000)) : 2000;
+			await Bun.sleep(sleepMs);
+		}
+	} finally {
+		if ((await readMonitorPid()) === process.pid) {
+			await rm(monitorPidPath, { force: true }).catch(() => undefined);
+		}
+	}
+}
+
+async function readMonitorPid(): Promise<number | undefined> {
+	try {
+		const pid = Number((await readFile(monitorPidPath, "utf8")).trim());
+		return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+async function claimMonitorSlot(): Promise<boolean> {
+	await mkdir(configDir, { recursive: true });
+	for (let attempt = 0; attempt < 2; attempt++) {
+		try {
+			await writeFile(monitorPidPath, `${process.pid}\n`, { flag: "wx", mode: 0o600 });
+			return true;
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== "EEXIST") return false;
+			const existing = await readMonitorPid();
+			if (existing !== undefined && existing !== process.pid && isAlive(existing)) return false;
+			await rm(monitorPidPath, { force: true }).catch(() => undefined);
+		}
+	}
+	return false;
 }
 
 /**
@@ -65,6 +184,7 @@ export async function refreshAttention(trigger?: "boundary"): Promise<void> {
 
 /** Drops every waiter and restores the lights. */
 export async function resetAttention(): Promise<void> {
+	await rm(path.join(configDir, "intents"), { recursive: true, force: true }).catch(() => undefined);
 	const config = await loadConfig();
 	if (!config) return;
 	await withLock(async () => {
@@ -86,7 +206,7 @@ export async function readState(): Promise<AttentionState> {
 async function reconcile(config: Config, state: AttentionState, trigger?: Trigger): Promise<void> {
 	// Sessions that died without clearing (crash, kill -9) must not pin the lights.
 	for (const [key, waiter] of Object.entries(state.waiters)) {
-		if (!isAlive(waiter.pid)) delete state.waiters[key];
+		if (waiter.pid !== undefined && !isAlive(waiter.pid)) delete state.waiters[key];
 	}
 	// Only requests made during the current window count, so one left over from blackout stays dark.
 	const windowStart = activeWindowStart(config.activeHours);
