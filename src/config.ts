@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
+import { type ActiveHours, parseHHMM } from "./hours.ts";
 
 /** Why omp wants attention. `input` (ask/approval/plan review) outranks `done` (agent settled). */
 export type Reason = "input" | "done";
@@ -21,6 +22,8 @@ export interface Config {
 	flash: boolean;
 	/** Quiet period after the agent settles before showing `done`; absorbs auto-retries and continuations. */
 	doneDelayMs: number;
+	/** Local-time window for alerts; events outside it switch the lights off. `null` disables the window. */
+	activeHours: ActiveHours | null;
 }
 
 export const DEFAULTS: Omit<Config, "bridge" | "username" | "lights"> = {
@@ -28,6 +31,7 @@ export const DEFAULTS: Omit<Config, "bridge" | "username" | "lights"> = {
 	brightness: 254,
 	flash: true,
 	doneDelayMs: 1500,
+	activeHours: { start: "08:00", end: "22:00" },
 };
 
 export const configDir = process.env.LIGHTCONTROL_DIR ?? path.join(homedir(), ".config", "lightcontrol");
@@ -46,11 +50,16 @@ export async function loadConfig(): Promise<Config | undefined> {
 	if (!parsed.bridge || !parsed.username || !Array.isArray(parsed.lights)) {
 		throw new Error(`${configPath}: bridge, username and lights are required; rerun setup`);
 	}
-	return {
+	const config = {
 		...DEFAULTS,
 		...parsed,
 		colors: { ...DEFAULTS.colors, ...parsed.colors },
 	} as Config;
+	if (config.activeHours) {
+		parseHHMM(config.activeHours.start);
+		parseHHMM(config.activeHours.end);
+	}
+	return config;
 }
 
 export async function saveConfig(config: Config): Promise<void> {

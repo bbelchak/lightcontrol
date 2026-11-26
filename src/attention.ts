@@ -1,17 +1,21 @@
 /**
  * Cross-process attention state. Every omp session shares one state file, so the lights show the
  * most urgent reason any live session is waiting on, and the pre-alert light state is captured once
- * and restored only after the last session stops waiting.
+ * and restored only after the last session stops waiting. Outside the configured active hours, alert
+ * events switch the lights off instead, and nothing is restored afterwards.
  */
 import { mkdir, readFile, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { type Config, configDir, loadConfig, REASON_PRIORITY, type Reason, writeJsonAtomic } from "./config.ts";
+import { activeWindowStart } from "./hours.ts";
 import { getLights, hexToXy, type LightState, restoreUpdate, setLightState } from "./hue.ts";
 
 interface Waiter {
 	pid: number;
 	reason: Reason;
 	since: number;
+	/** Shown regardless of active hours (`lights test`). */
+	force?: boolean;
 }
 
 export interface AttentionState {
@@ -28,25 +32,35 @@ const lockPath = path.join(configDir, "state.lock");
 const STALE_LOCK_MS = 15_000;
 
 /**
- * Sets (`reason`) or clears (`undefined`) the attention request for `key`, then repaints or
- * restores the lights if the winning reason changed. No-op when setup has not been run.
+ * What prompted a reconcile, for blackout handling: `event` is a new enabled alert, `boundary` the
+ * active window closing. Either one switches the lights off during blackout.
  */
-export async function setAttention(key: string, reason: Reason | undefined): Promise<void> {
+type Trigger = "event" | "boundary";
+
+/**
+ * Sets (`reason`) or clears (`undefined`) the attention request for `key`, then repaints or
+ * restores the lights if the winning reason changed. `force` ignores active hours.
+ * No-op when setup has not been run.
+ */
+export async function setAttention(key: string, reason: Reason | undefined, force = false): Promise<void> {
 	const config = await loadConfig();
 	if (!config) return;
 	await withLock(async () => {
 		const state = await readState();
-		if (reason) state.waiters[key] = { pid: process.pid, reason, since: Date.now() };
+		if (reason) state.waiters[key] = { pid: process.pid, reason, since: Date.now(), ...(force && { force }) };
 		else delete state.waiters[key];
-		await reconcile(config, state);
+		await reconcile(config, state, reason && !force && config.colors[reason] ? "event" : undefined);
 	});
 }
 
-/** Re-evaluates the state, which restores the lights once every waiting session has died. */
-export async function refreshAttention(): Promise<void> {
+/**
+ * Re-evaluates the state, which restores the lights once every waiting session has died.
+ * `boundary` (the active window just closed) switches a still-showing alert off.
+ */
+export async function refreshAttention(trigger?: "boundary"): Promise<void> {
 	const config = await loadConfig();
 	if (!config) return;
-	await withLock(async () => reconcile(config, await readState()));
+	await withLock(async () => reconcile(config, await readState(), trigger));
 }
 
 /** Drops every waiter and restores the lights. */
@@ -69,15 +83,27 @@ export async function readState(): Promise<AttentionState> {
 	}
 }
 
-async function reconcile(config: Config, state: AttentionState): Promise<void> {
+async function reconcile(config: Config, state: AttentionState, trigger?: Trigger): Promise<void> {
 	// Sessions that died without clearing (crash, kill -9) must not pin the lights.
 	for (const [key, waiter] of Object.entries(state.waiters)) {
 		if (!isAlive(waiter.pid)) delete state.waiters[key];
 	}
-	const active = new Set(Object.values(state.waiters).map(w => w.reason));
+	// Only requests made during the current window count, so one left over from blackout stays dark.
+	const windowStart = activeWindowStart(config.activeHours);
+	const active = new Set(
+		Object.values(state.waiters)
+			.filter(w => w.force || (windowStart !== undefined && w.since >= windowStart))
+			.map(w => w.reason),
+	);
 	const target = REASON_PRIORITY.find(r => active.has(r) && config.colors[r]);
 
-	if (target !== state.shown) {
+	if (!target && windowStart === undefined && (trigger === "event" || (trigger === "boundary" && state.shown))) {
+		await Promise.allSettled(
+			config.lights.map(id => setLightState(config.bridge, config.username, id, { on: false, transitiontime: 2 })),
+		);
+		delete state.snapshot;
+		state.shown = undefined;
+	} else if (target !== state.shown) {
 		if (target) {
 			state.snapshot ??= await snapshot(config);
 			await paint(config, target);

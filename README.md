@@ -42,13 +42,18 @@ so edits apply without restarting omp.
 	"colors": { "input": "#ff3000", "done": "#00ff50" },
 	"brightness": 254,
 	"flash": true,
-	"doneDelayMs": 1500
+	"doneDelayMs": 1500,
+	"activeHours": { "start": "08:00", "end": "22:00" }
 }
 ```
 
 - `colors.<reason>: null` disables that signal.
 - `flash` breathes the lights once when the color changes.
 - `doneDelayMs` waits before showing `done`, so auto-retries and continuations don't flicker the lights.
+- `activeHours` (local time) limits alerts to that window. In the blackout period outside it, an `input` or `done`
+  event switches the lights off instead, and they stay off. An alert still showing when the window closes is switched
+  off too. A request left waiting from blackout does not light up when the window opens. `start` later than `end`
+  crosses midnight; `null` disables the window. `test` ignores it.
 - White-only bulbs get brightness and the flash but not the color.
 
 Manual light changes made while an alert is showing are overwritten by the restore.

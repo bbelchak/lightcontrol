@@ -123,7 +123,7 @@ switch (positionals[0]) {
 		const key = `${process.pid}:cli-test`;
 		for (const reason of ["input", "done"] as const) {
 			console.log(reason);
-			await setAttention(key, reason);
+			await setAttention(key, reason, true);
 			await Bun.sleep(2500);
 		}
 		await setAttention(key, undefined);

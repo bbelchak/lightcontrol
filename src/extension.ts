@@ -7,8 +7,9 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { resetAttention, setAttention } from "./attention.ts";
+import { refreshAttention, resetAttention, setAttention } from "./attention.ts";
 import { DEFAULTS, loadConfig, type Reason } from "./config.ts";
+import { nextWindowEnd } from "./hours.ts";
 
 let watcherStarted = false;
 
@@ -37,19 +38,46 @@ export default function lightcontrol(pi: ExtensionAPI): void {
 	let settled = false;
 	let doneTimer: NodeJS.Timeout | undefined;
 	let published: Reason | undefined;
+	let boundaryTimer: NodeJS.Timeout | undefined;
 	let queue = Promise.resolve();
 
 	const watched = (ctx: ExtensionContext) => ctx.hasUI && ctx.agent.kind === "main";
+
+	/** Serialized so a slow bridge cannot reorder alert/clear. */
+	function enqueue(step: () => Promise<void>): void {
+		queue = queue
+			.then(step)
+			.catch(err => pi.logger.warn("lightcontrol: failed to update lights", { error: String(err) }));
+	}
+
+	/** While this session waits, switches the lights off when the active window closes. Runs inside the queue. */
+	async function armBoundary(): Promise<void> {
+		clearTimeout(boundaryTimer);
+		boundaryTimer = undefined;
+		if (!published) return;
+		const end = nextWindowEnd((await loadConfig())?.activeHours ?? null);
+		if (end === undefined) return;
+		// The margin puts the refresh past the boundary minute, inside blackout.
+		boundaryTimer = setTimeout(
+			() =>
+				enqueue(async () => {
+					await refreshAttention("boundary");
+					await armBoundary();
+				}),
+			end - Date.now() + 1000,
+		);
+		boundaryTimer.unref();
+	}
 
 	function publish(): void {
 		const reason: Reason | undefined = blockers.size > 0 ? "input" : settled ? "done" : undefined;
 		if (reason === published) return;
 		if (reason) startExitWatcher();
 		published = reason;
-		// Serialized so a slow bridge cannot reorder alert/clear.
-		queue = queue
-			.then(() => setAttention(key, reason))
-			.catch(err => pi.logger.warn("lightcontrol: failed to update lights", { error: String(err) }));
+		enqueue(async () => {
+			await setAttention(key, reason);
+			await armBoundary();
+		});
 	}
 
 	function cancelDone(): void {
@@ -109,9 +137,7 @@ export default function lightcontrol(pi: ExtensionAPI): void {
 	// Prunes alerts left by sessions that died without session_shutdown (kill -9, crash).
 	pi.on("session_start", (_event, ctx) => {
 		if (!watched(ctx)) return;
-		queue = queue
-			.then(() => setAttention(key, undefined))
-			.catch(err => pi.logger.warn("lightcontrol: failed to update lights", { error: String(err) }));
+		enqueue(() => setAttention(key, undefined));
 	});
 	pi.on("session_switch", () => {
 		blockers.clear();
@@ -140,7 +166,7 @@ export default function lightcontrol(pi: ExtensionAPI): void {
 			} else if (sub === "test") {
 				for (const reason of ["input", "done"] as const) {
 					ctx.ui.notify(`Lights: ${reason}`);
-					await setAttention(key, reason);
+					await setAttention(key, reason, true);
 					await Bun.sleep(2500);
 				}
 				await setAttention(key, published);
