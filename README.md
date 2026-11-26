@@ -19,12 +19,22 @@ alerts off when active hours end.
 
 ## Agent Support
 
-| Agent | Integration | `input` signals | `done` signal | Notes |
-| --- | --- | --- | --- | --- |
-| **omp** | `~/.omp/agent/extensions/lightcontrol.ts` | `ask`, tool approval, plan review | `agent_end` | Also registers `/lights clear \| test`. |
-| **Antigravity (`agy`)** | `~/.gemini/config/plugins/lightcontrol/` | `ask_question` | `Stop` (skips `USER_CANCELED`) | Antigravity does not expose a tool-approval prompt hook; `ask_question` and `Stop` work in both CLI and app. |
-| **Claude Code** | `~/.claude/settings.json` (`hooks`) | `PermissionRequest`, `Notification` (`permission_prompt`, `elicitation_*`), `AskUserQuestion`, `ExitPlanMode` | `Stop` | Merges non-destructively with existing hooks; ignores subagents (`agent_id`). |
-| **Codex** | `~/.codex/hooks.json` (`hooks`) | `PermissionRequest`, `request_user_input` | `Stop` | Merges non-destructively; requires `[features] hooks = true` and trusting hooks via `/hooks`. |
+- **omp** (`~/.omp/agent/extensions/lightcontrol.ts`)
+  - `input`: `ask`, tool approval, plan review
+  - `done`: `agent_end`
+  - Also registers `/lights clear | test`.
+- **Antigravity (`agy`)** (`~/.gemini/config/plugins/lightcontrol/`)
+  - `input`: `ask_question`
+  - `done`: `Stop` (skips `USER_CANCELED`)
+  - Works in both CLI and desktop app; Antigravity does not expose a tool-approval prompt hook.
+- **Claude Code** (`~/.claude/settings.json`)
+  - `input`: `PermissionRequest`, `Notification` (`permission_prompt`, `elicitation_*`), `AskUserQuestion`, `ExitPlanMode`
+  - `done`: `Stop`
+  - Merges non-destructively with existing hooks and ignores subagents (`agent_id`).
+- **Codex** (`~/.codex/hooks.json`)
+  - `input`: `PermissionRequest`, `request_user_input`
+  - `done`: `Stop`
+  - Merges non-destructively; requires `[features] hooks = true` and trusting the new hooks via `/hooks`.
 
 ## Requirements
 
