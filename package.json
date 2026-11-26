@@ -1,5 +1,5 @@
 {
-  "name": "lightcontrol",
+  "name": "omp-lightcontrol",
   "description": "omp extension that recolors Philips Hue lights while omp waits on you",
   "type": "module",
   "private": true,

@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "lightcontrol",
+      "name": "omp-lightcontrol",
       "devDependencies": {
         "@oh-my-pi/pi-coding-agent": "18.20.2",
         "@types/bun": "latest",
