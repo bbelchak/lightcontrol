@@ -35,8 +35,8 @@ alerts off when active hours end.
 ## Setup
 
 ```sh
-git clone https://github.com/bbelchak/omp-lightcontrol.git
-cd omp-lightcontrol
+git clone https://github.com/bbelchak/lightcontrol.git
+cd lightcontrol
 bun install
 bun run lights setup      # finds the bridge, waits for the link button, picks lights
 bun run lights install    # installs into all detected agents (or pass: omp agy claude codex all)

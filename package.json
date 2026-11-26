@@ -1,5 +1,5 @@
 {
-  "name": "omp-lightcontrol",
+  "name": "lightcontrol",
   "description": "Recolors Philips Hue lights while omp, Antigravity (agy), Claude Code, or Codex is waiting on you",
   "type": "module",
   "private": true,
