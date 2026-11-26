@@ -38,7 +38,7 @@ so edits apply without restarting omp.
 {
 	"bridge": "<bridge IP>",
 	"username": "<app key from pairing>",
-	"lights": ["5", "6", "8"],
+	"lights": ["1", "2"],
 	"colors": { "input": "#ff3000", "done": "#00ff50" },
 	"brightness": 254,
 	"flash": true,
