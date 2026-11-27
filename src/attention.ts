@@ -230,33 +230,39 @@ async function reconcile(config: Config, state: AttentionState, trigger?: Trigge
 		} else {
 			delete state.blackout;
 		}
-		await Promise.allSettled(
+		const results = await Promise.allSettled(
 			config.lights.map(id => setLightState(config.bridge, config.username, id, { on: false, transitiontime: 2 })),
 		);
+		// Remember only lights blackout actually switched off.
+		for (const [i, r] of results.entries()) {
+			if (r.status === "rejected") delete state.blackout?.[config.lights[i]!];
+		}
 		delete state.snapshot;
 		state.shown = undefined;
-	} else if (target !== state.shown) {
+	} else {
 		if (target) {
-			if (!state.snapshot) {
-				const current = await snapshot(config);
-				// A forced alert (`lights test`) during blackout must not turn the lights back on afterwards.
-				if (windowStart === undefined) {
-					state.snapshot = current;
-				} else {
-					state.snapshot = config.restoreAfterBlackout ? keepIfStillOff(state.blackout, current) : current;
-					delete state.blackout;
-				}
+			state.snapshot ??= await snapshot(config);
+			// The first alert of the active window takes over the blackout state, also when it joins a
+			// forced alert (`lights test`) whose snapshot was captured with the lights still off.
+			// A forced alert during blackout leaves it pending, so the test does not turn the lights back on.
+			if (windowStart !== undefined && state.blackout) {
+				if (config.restoreAfterBlackout) state.snapshot = keepIfStillOff(state.blackout, state.snapshot);
+				delete state.blackout;
 			}
-			await paint(config, target);
-		} else if (state.snapshot) {
-			await Promise.allSettled(
-				Object.entries(state.snapshot).map(([id, s]) =>
-					setLightState(config.bridge, config.username, id, restoreUpdate(s)),
-				),
-			);
-			delete state.snapshot;
 		}
-		state.shown = target;
+		if (target !== state.shown) {
+			if (target) {
+				await paint(config, target);
+			} else if (state.snapshot) {
+				await Promise.allSettled(
+					Object.entries(state.snapshot).map(([id, s]) =>
+						setLightState(config.bridge, config.username, id, restoreUpdate(s)),
+					),
+				);
+				delete state.snapshot;
+			}
+			state.shown = target;
+		}
 	}
 	await writeJsonAtomic(statePath, state);
 }
