@@ -377,3 +377,114 @@ describe("cli hook subprocess", () => {
 		expect(await fileExists(path.join(configDir, "intents", `${hashKey("claude:s-noop")}.json`))).toBe(false);
 	});
 });
+
+describe("blackout restore", () => {
+	const attentionPath = path.resolve(import.meta.dir, "../src/attention.ts");
+
+	// Runs in a child process: config.ts fixes LIGHTCONTROL_DIR at import, the bridge is a fetch fake,
+	// and the clock is fixed so the active window (08:00 to 22:00) does not depend on when tests run.
+	const scenario = `
+import { setSystemTime } from "bun:test";
+import { writeFile } from "node:fs/promises";
+import path from "node:path";
+import { refreshAttention, setAttention } from ${JSON.stringify(attentionPath)};
+
+const [mode, restore] = process.argv.slice(2);
+const lights = {
+	"1": { on: true, bri: 120, ct: 400, xy: [0.45, 0.41], colormode: "ct" },
+	"2": { on: true, bri: 200, ct: 250, xy: [0.4, 0.4], colormode: "ct" },
+};
+globalThis.fetch = async (url, init) => {
+	const id = /\\/lights\\/(\\w+)\\/state$/.exec(new URL(url).pathname)?.[1];
+	if (init?.method === "PUT") {
+		const { transitiontime, alert, ...update } = JSON.parse(init.body);
+		if (update.xy) update.colormode = "xy";
+		else if (update.ct) update.colormode = "ct";
+		Object.assign(lights[id], update);
+		return Response.json([{ success: {} }]);
+	}
+	return Response.json(Object.fromEntries(Object.entries(lights).map(([k, state]) => [k, { name: k, type: "x", state: { ...state } }])));
+};
+await writeFile(
+	path.join(process.env.LIGHTCONTROL_DIR, "config.json"),
+	JSON.stringify({ bridge: "bridge.test", username: "u", lights: ["1", "2"], flash: false, restoreAfterBlackout: restore === "true" }),
+);
+const at = (day, h, m, s = 0) => setSystemTime(new Date(2026, 0, day, h, m, s));
+const record = () => JSON.parse(JSON.stringify(lights));
+const out = {};
+
+// Someone switches light 2 on overnight.
+const switchOn = () => Object.assign(lights["2"], { on: true, bri: 30, ct: 454, colormode: "ct" });
+if (mode === "boundary") {
+	// An alert is still showing when the window closes.
+	at(1, 21, 0);
+	await setAttention("evening", "done", { pid: null });
+	at(1, 22, 0, 1);
+	await refreshAttention("boundary");
+	out.night = record();
+	switchOn();
+} else {
+	// An event during blackout, then \`lights test\` near the window opening.
+	at(1, 23, 0);
+	await setAttention("night", "input", { pid: null });
+	out.night = record();
+	switchOn();
+	if (mode === "overlap") {
+		// Still showing when the morning alert joins it.
+		at(2, 7, 59, 58);
+		await setAttention("test", "input", { pid: null, force: true });
+	} else {
+		// Runs and ends inside the window, before any real alert.
+		at(2, 8, 0, 1);
+		await setAttention("test", "input", { pid: null, force: true });
+		await setAttention("test", undefined, { pid: null });
+		out.afterTest = record();
+	}
+}
+at(2, 8, 30);
+await setAttention("morning", "input", { pid: null });
+out.alert = record();
+await setAttention("test", undefined, { pid: null });
+await setAttention("morning", undefined, { pid: null });
+out.answered = record();
+console.log(JSON.stringify(out));
+`;
+
+	async function run(mode: "boundary" | "overlap" | "testonly", restoreAfterBlackout: boolean) {
+		const dir = await makeTempDir();
+		const script = path.join(dir, "scenario.ts");
+		await writeFile(script, scenario);
+		const proc = Bun.spawnSync([process.execPath, script, mode, String(restoreAfterBlackout)], {
+			stdout: "pipe",
+			stderr: "pipe",
+			env: { ...process.env, LIGHTCONTROL_DIR: dir },
+		});
+		expect(proc.stderr.toString("utf8")).toBe("");
+		return JSON.parse(proc.stdout.toString("utf8"));
+	}
+
+	for (const mode of ["boundary", "overlap", "testonly"] as const) {
+		test(`${mode}: the first alert of the next window restores the pre-blackout state`, async () => {
+			const out = await run(mode, true);
+			expect(out.night["1"].on).toBe(false);
+			expect(out.night["2"].on).toBe(false);
+			expect(out.alert["1"]).toMatchObject({ on: true, colormode: "xy" });
+			// Light 1 was still off as blackout left it: back to its evening state, not the alert color.
+			expect(out.answered["1"]).toMatchObject({ on: true, bri: 120, ct: 400, colormode: "ct" });
+			// Light 2 was switched on overnight: its current state wins.
+			expect(out.answered["2"]).toMatchObject({ on: true, bri: 30, ct: 454, colormode: "ct" });
+		});
+	}
+
+	test("a forced test alone does not restore the pre-blackout state", async () => {
+		const out = await run("testonly", true);
+		expect(out.afterTest["1"].on).toBe(false);
+		expect(out.afterTest["2"]).toMatchObject({ on: true, bri: 30, ct: 454 });
+	});
+
+	test("restoreAfterBlackout: false leaves blacked-out lights off", async () => {
+		const out = await run("boundary", false);
+		expect(out.answered["1"].on).toBe(false);
+		expect(out.answered["2"]).toMatchObject({ on: true, bri: 30, ct: 454 });
+	});
+});
