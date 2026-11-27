@@ -424,13 +424,22 @@ if (mode === "boundary") {
 	out.night = record();
 	switchOn();
 } else {
-	// An event during blackout, then \`lights test\` overlapping the window opening.
+	// An event during blackout, then \`lights test\` near the window opening.
 	at(1, 23, 0);
 	await setAttention("night", "input", { pid: null });
 	out.night = record();
 	switchOn();
-	at(2, 7, 59, 58);
-	await setAttention("test", "input", { pid: null, force: true });
+	if (mode === "overlap") {
+		// Still showing when the morning alert joins it.
+		at(2, 7, 59, 58);
+		await setAttention("test", "input", { pid: null, force: true });
+	} else {
+		// Runs and ends inside the window, before any real alert.
+		at(2, 8, 0, 1);
+		await setAttention("test", "input", { pid: null, force: true });
+		await setAttention("test", undefined, { pid: null });
+		out.afterTest = record();
+	}
 }
 at(2, 8, 30);
 await setAttention("morning", "input", { pid: null });
@@ -441,7 +450,7 @@ out.answered = record();
 console.log(JSON.stringify(out));
 `;
 
-	async function run(mode: "boundary" | "forced", restoreAfterBlackout: boolean) {
+	async function run(mode: "boundary" | "overlap" | "testonly", restoreAfterBlackout: boolean) {
 		const dir = await makeTempDir();
 		const script = path.join(dir, "scenario.ts");
 		await writeFile(script, scenario);
@@ -454,7 +463,7 @@ console.log(JSON.stringify(out));
 		return JSON.parse(proc.stdout.toString("utf8"));
 	}
 
-	for (const mode of ["boundary", "forced"] as const) {
+	for (const mode of ["boundary", "overlap", "testonly"] as const) {
 		test(`${mode}: the first alert of the next window restores the pre-blackout state`, async () => {
 			const out = await run(mode, true);
 			expect(out.night["1"].on).toBe(false);
@@ -466,6 +475,12 @@ console.log(JSON.stringify(out));
 			expect(out.answered["2"]).toMatchObject({ on: true, bri: 30, ct: 454, colormode: "ct" });
 		});
 	}
+
+	test("a forced test alone does not restore the pre-blackout state", async () => {
+		const out = await run("testonly", true);
+		expect(out.afterTest["1"].on).toBe(false);
+		expect(out.afterTest["2"]).toMatchObject({ on: true, bri: 30, ct: 454 });
+	});
 
 	test("restoreAfterBlackout: false leaves blacked-out lights off", async () => {
 		const out = await run("boundary", false);

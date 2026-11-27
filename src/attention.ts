@@ -224,28 +224,31 @@ async function reconcile(config: Config, state: AttentionState, trigger?: Trigge
 	const target = REASON_PRIORITY.find(r => active.has(r) && config.colors[r]);
 
 	if (!target && windowStart === undefined && (trigger === "event" || (trigger === "boundary" && state.shown))) {
-		if (config.restoreAfterBlackout) {
-			const current = state.snapshot ?? (await snapshot(config).catch(() => undefined));
-			if (current) state.blackout = keepIfStillOff(state.blackout, current);
-		} else {
-			delete state.blackout;
-		}
+		const current = config.restoreAfterBlackout
+			? (state.snapshot ?? (await snapshot(config).catch(() => undefined)))
+			: undefined;
+		if (current) state.blackout = keepIfStillOff(state.blackout, current);
+		else if (!config.restoreAfterBlackout) delete state.blackout;
 		const results = await Promise.allSettled(
 			config.lights.map(id => setLightState(config.bridge, config.username, id, { on: false, transitiontime: 2 })),
 		);
-		// Remember only lights blackout actually switched off.
+		// Remember only lights blackout switched off: drop a light whose off failed unless it was already off.
 		for (const [i, r] of results.entries()) {
-			if (r.status === "rejected") delete state.blackout?.[config.lights[i]!];
+			const id = config.lights[i]!;
+			if (r.status === "rejected" && current?.[id]?.on !== false) delete state.blackout?.[id];
 		}
 		delete state.snapshot;
 		state.shown = undefined;
 	} else {
 		if (target) {
 			state.snapshot ??= await snapshot(config);
-			// The first alert of the active window takes over the blackout state, also when it joins a
-			// forced alert (`lights test`) whose snapshot was captured with the lights still off.
-			// A forced alert during blackout leaves it pending, so the test does not turn the lights back on.
-			if (windowStart !== undefined && state.blackout) {
+			// The first real alert of the active window takes over the blackout state, also when it joins
+			// a forced alert (`lights test`) whose snapshot was captured with the lights still off. Forced
+			// alerts alone leave it pending, so a test does not turn the lights back on afterwards.
+			const realAlert =
+				windowStart !== undefined &&
+				Object.values(state.waiters).some(w => !w.force && w.since >= windowStart && config.colors[w.reason]);
+			if (realAlert && state.blackout) {
 				if (config.restoreAfterBlackout) state.snapshot = keepIfStillOff(state.blackout, state.snapshot);
 				delete state.blackout;
 			}
