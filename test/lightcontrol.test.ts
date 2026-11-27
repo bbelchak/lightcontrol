@@ -377,3 +377,90 @@ describe("cli hook subprocess", () => {
 		expect(await fileExists(path.join(configDir, "intents", `${hashKey("claude:s-noop")}.json`))).toBe(false);
 	});
 });
+
+describe("blackout restore", () => {
+	const attentionPath = path.resolve(import.meta.dir, "../src/attention.ts");
+
+	// Runs in a child process: config.ts fixes LIGHTCONTROL_DIR at import, and the bridge is a fetch fake.
+	const scenario = `
+import { writeFile } from "node:fs/promises";
+import path from "node:path";
+import { setAttention } from ${JSON.stringify(attentionPath)};
+
+const restoreAfterBlackout = process.argv[2] === "true";
+const lights = {
+	"1": { on: true, bri: 120, ct: 400, xy: [0.45, 0.41], colormode: "ct" },
+	"2": { on: true, bri: 200, ct: 250, xy: [0.4, 0.4], colormode: "ct" },
+};
+globalThis.fetch = async (url, init) => {
+	const id = /\\/lights\\/(\\w+)\\/state$/.exec(new URL(url).pathname)?.[1];
+	if (init?.method === "PUT") {
+		const { transitiontime, alert, ...update } = JSON.parse(init.body);
+		if (update.xy) update.colormode = "xy";
+		else if (update.ct) update.colormode = "ct";
+		Object.assign(lights[id], update);
+		return Response.json([{ success: {} }]);
+	}
+	return Response.json(Object.fromEntries(Object.entries(lights).map(([k, state]) => [k, { name: k, type: "x", state: { ...state } }])));
+};
+
+const hhmm = offset => {
+	const d = new Date(Date.now() + offset * 60_000);
+	return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+};
+const configure = activeHours =>
+	writeFile(
+		path.join(process.env.LIGHTCONTROL_DIR, "config.json"),
+		JSON.stringify({ bridge: "bridge.test", username: "u", lights: ["1", "2"], flash: false, activeHours, restoreAfterBlackout }),
+	);
+const record = () => JSON.parse(JSON.stringify(lights));
+const out = {};
+
+await configure({ start: "08:00", end: "22:00" });
+await setAttention("evening", "done", { pid: null, force: true });
+// Night: the window closed, and an event arrives during blackout.
+await configure({ start: hhmm(5), end: hhmm(10) });
+await setAttention("evening", undefined, { pid: null });
+await setAttention("night", "input", { pid: null });
+out.night = record();
+// Someone switches light 2 on before the morning.
+Object.assign(lights["2"], { on: true, bri: 30, ct: 454, colormode: "ct" });
+// Morning: the window opens, an alert shows, and the user answers.
+await configure({ start: hhmm(0), end: hhmm(5) });
+await setAttention("night", "input", { pid: null });
+out.alert = record();
+await setAttention("night", undefined, { pid: null });
+out.answered = record();
+console.log(JSON.stringify(out));
+`;
+
+	async function run(restoreAfterBlackout: boolean) {
+		const dir = await makeTempDir();
+		const script = path.join(dir, "scenario.ts");
+		await writeFile(script, scenario);
+		const proc = Bun.spawnSync([process.execPath, script, String(restoreAfterBlackout)], {
+			stdout: "pipe",
+			stderr: "pipe",
+			env: { ...process.env, LIGHTCONTROL_DIR: dir },
+		});
+		expect(proc.stderr.toString("utf8")).toBe("");
+		return JSON.parse(proc.stdout.toString("utf8"));
+	}
+
+	test("the first alert of the next window restores the pre-blackout state", async () => {
+		const out = await run(true);
+		expect(out.night["1"].on).toBe(false);
+		expect(out.night["2"].on).toBe(false);
+		expect(out.alert["1"]).toMatchObject({ on: true, colormode: "xy" });
+		// Light 1 was still off as blackout left it: back to its evening state, not the alert color.
+		expect(out.answered["1"]).toMatchObject({ on: true, bri: 120, ct: 400, colormode: "ct" });
+		// Light 2 was switched on overnight: its current state wins.
+		expect(out.answered["2"]).toMatchObject({ on: true, bri: 30, ct: 454, colormode: "ct" });
+	});
+
+	test("restoreAfterBlackout: false leaves blacked-out lights off", async () => {
+		const out = await run(false);
+		expect(out.answered["1"].on).toBe(false);
+		expect(out.answered["2"]).toMatchObject({ on: true, bri: 30, ct: 454 });
+	});
+});

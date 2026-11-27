@@ -2,7 +2,8 @@
  * Cross-process attention state. Every supported agent session shares one state file, so the lights
  * show the most urgent reason any live session is waiting on, and the pre-alert light state is
  * captured once and restored only after the last session stops waiting. Outside the configured
- * active hours, alert events switch the lights off instead, and nothing is restored afterwards.
+ * active hours, alert events switch the lights off instead; with `restoreAfterBlackout`, the state
+ * they had before is restored after the first alert of the next active window.
  */
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -22,6 +23,11 @@ export interface Waiter {
 export interface AttentionState {
 	/** Light states captured before the first alert; present exactly while an alert is shown. */
 	snapshot?: Record<string, LightState>;
+	/**
+	 * Light states from before lightcontrol last switched the lights off for blackout
+	 * (`restoreAfterBlackout`); the next alert in the active window restores to these instead.
+	 */
+	blackout?: Record<string, LightState>;
 	/** Reason currently painted on the lights. */
 	shown?: Reason;
 	waiters: Record<string, Waiter>;
@@ -218,6 +224,12 @@ async function reconcile(config: Config, state: AttentionState, trigger?: Trigge
 	const target = REASON_PRIORITY.find(r => active.has(r) && config.colors[r]);
 
 	if (!target && windowStart === undefined && (trigger === "event" || (trigger === "boundary" && state.shown))) {
+		if (config.restoreAfterBlackout) {
+			const current = state.snapshot ?? (await snapshot(config).catch(() => undefined));
+			if (current) state.blackout = keepIfStillOff(state.blackout, current);
+		} else {
+			delete state.blackout;
+		}
 		await Promise.allSettled(
 			config.lights.map(id => setLightState(config.bridge, config.username, id, { on: false, transitiontime: 2 })),
 		);
@@ -225,7 +237,16 @@ async function reconcile(config: Config, state: AttentionState, trigger?: Trigge
 		state.shown = undefined;
 	} else if (target !== state.shown) {
 		if (target) {
-			state.snapshot ??= await snapshot(config);
+			if (!state.snapshot) {
+				const current = await snapshot(config);
+				// A forced alert (`lights test`) during blackout must not turn the lights back on afterwards.
+				if (windowStart === undefined) {
+					state.snapshot = current;
+				} else {
+					state.snapshot = config.restoreAfterBlackout ? keepIfStillOff(state.blackout, current) : current;
+					delete state.blackout;
+				}
+			}
 			await paint(config, target);
 		} else if (state.snapshot) {
 			await Promise.allSettled(
@@ -238,6 +259,19 @@ async function reconcile(config: Config, state: AttentionState, trigger?: Trigge
 		state.shown = target;
 	}
 	await writeJsonAtomic(statePath, state);
+}
+
+/**
+ * Per light, the `saved` blackout state while the bulb is still off as lightcontrol left it;
+ * a light someone switched on since then keeps its current state.
+ */
+function keepIfStillOff(
+	saved: Record<string, LightState> | undefined,
+	current: Record<string, LightState>,
+): Record<string, LightState> {
+	return Object.fromEntries(
+		Object.entries(current).map(([id, state]) => [id, !state.on && saved?.[id] ? saved[id] : state]),
+	);
 }
 
 async function snapshot(config: Config): Promise<Record<string, LightState>> {

@@ -24,6 +24,11 @@ export interface Config {
 	doneDelayMs: number;
 	/** Local-time window for alerts; events outside it switch the lights off. `null` disables the window. */
 	activeHours: ActiveHours | null;
+	/**
+	 * Remember the light state when blackout switches the lights off, and restore it after the first
+	 * alert of the next active window instead of leaving the lights off.
+	 */
+	restoreAfterBlackout: boolean;
 }
 
 export const DEFAULTS: Omit<Config, "bridge" | "username" | "lights"> = {
@@ -32,6 +37,7 @@ export const DEFAULTS: Omit<Config, "bridge" | "username" | "lights"> = {
 	flash: true,
 	doneDelayMs: 1500,
 	activeHours: { start: "08:00", end: "22:00" },
+	restoreAfterBlackout: true,
 };
 
 export const configDir = process.env.LIGHTCONTROL_DIR ?? path.join(homedir(), ".config", "lightcontrol");

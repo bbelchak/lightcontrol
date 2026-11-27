@@ -78,7 +78,8 @@ so edits apply without restarting your agent.
 	"brightness": 254,
 	"flash": true,
 	"doneDelayMs": 1500,
-	"activeHours": { "start": "08:00", "end": "22:00" }
+	"activeHours": { "start": "08:00", "end": "22:00" },
+	"restoreAfterBlackout": true
 }
 ```
 
@@ -89,6 +90,9 @@ so edits apply without restarting your agent.
   event switches the lights off instead, and they stay off. An alert still showing when the window closes is switched
   off too. A request left waiting from blackout does not light up when the window opens. `start` later than `end`
   crosses midnight; `null` disables the window. `test` ignores it.
+- `restoreAfterBlackout` remembers how the lights were when blackout switched them off. When you answer the first
+  alert of the next active window, they return to that state instead of staying off. A light someone has switched on
+  in the meantime keeps its current state. `false` leaves the lights off, as they were before the alert.
 - White-only bulbs get brightness and the flash but not the color.
 
 Manual light changes made while an alert is showing are overwritten by the restore.
